@@ -1,0 +1,37 @@
+# ===== Exemplo fornecido pelos docentes (não versionar) =====
+ProgEx/
+
+# ===== macOS =====
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# ===== Java =====
+*.class
+*.jar
+!lib/*.jar
+out/
+bin/
+target/
+build/
+
+# ===== IDEs / editores =====
+.vscode/
+.idea/
+*.iml
+*.swp
+*~
+
+# ===== Logs / temporários =====
+*.log
+*.tmp
