@@ -67,6 +67,7 @@ class No:
         self.lock = threading.RLock()        # protege self.vizinhos
         self.a_correr = threading.Event()
         self._servidor = None
+        self._a_religar = set()              # vizinhos com religação em curso
         self.log = logging.getLogger(nome)
 
     # =====================================================================
@@ -133,16 +134,18 @@ class No:
     # =====================================================================
     # Estabelecimento de ligações
     # =====================================================================
-    def ligar(self, nome, ip):
+    def ligar(self, nome, ip, tentativas=None):
         """Liga-se ativamente a um vizinho e troca HELLO nos dois sentidos."""
-        for tentativa in range(1, self.TENTATIVAS_LIGACAO + 1):
+        tentativas = tentativas or self.TENTATIVAS_LIGACAO
+        for tentativa in range(1, tentativas + 1):
             try:
                 sock = socket.create_connection((ip, P.PORTA_CONTROLO), timeout=3)
                 break
             except OSError as e:
                 self.log.warning("ligação a %s (%s) falhou [%d/%d]: %s",
-                                 nome, ip, tentativa, self.TENTATIVAS_LIGACAO, e)
-                time.sleep(self.INTERVALO_TENTATIVAS)
+                                 nome, ip, tentativa, tentativas, e)
+                if tentativa < tentativas:
+                    time.sleep(self.INTERVALO_TENTATIVAS)
         else:
             return None
         try:
@@ -281,9 +284,28 @@ class No:
                     ja_ligado = v["nome"] in self.vizinhos
                 # só o nó de nome menor inicia a religação (evita duplicados)
                 if not ja_ligado and self.nome < v["nome"]:
-                    self.log.info("refresh: %s está ativo mas não ligado -> a religar",
-                                  v["nome"])
-                    self.ligar(v["nome"], v["ip"])
+                    self._religar_em_fundo(v["nome"], v["ip"])
+
+    def _religar_em_fundo(self, nome, ip):
+        """
+        Religação numa thread própria, para o refresh nunca ficar bloqueado à
+        espera de timeouts (D21). Uma só tentativa: se falhar, o refresh
+        seguinte volta a tentar. Nunca há duas religações ao mesmo vizinho.
+        """
+        with self.lock:
+            if nome in self._a_religar:
+                return
+            self._a_religar.add(nome)
+        self.log.info("refresh: %s está ativo mas não ligado -> a religar", nome)
+
+        def tarefa():
+            try:
+                self.ligar(nome, ip, tentativas=1)
+            finally:
+                with self.lock:
+                    self._a_religar.discard(nome)
+
+        threading.Thread(target=tarefa, daemon=True, name="religar-" + nome).start()
 
     # =====================================================================
     # Utilitários

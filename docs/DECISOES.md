@@ -252,6 +252,73 @@ Formato de cada entrada: **contexto → decisão → porquê → alternativas re
   - Vizinhos reportarem mortes ao bootstrapper — um link em baixo entre dois
     nós poderia marcar como morto um nó que está vivo.
 
+## Cenários de teste
+
+### D19 · Cenário 1: nó intermédio do lado dos clientes
+- **Data:** 2026-11-03
+- **Topologia underlay (CORE):** routers n4 e n3 ligados entre si; PCs n1
+  (10.0.3.20) e n2 (10.0.4.20) no n4; PCs n5 (10.0.0.20), n6 (10.0.1.20) e
+  n7 (novo, 10.0.5.20) no n3.
+- **Mapeamento overlay → underlay:**
+
+  | Nó overlay | Papel | PC | IP |
+  |---|---|---|---|
+  | O1 | Servidor S1 | n1 | 10.0.3.20 |
+  | O2 | Nó intermédio | n7 → **router n3** (D20) | 10.0.5.20 → **10.0.2.1** |
+  | O3 | Cliente C1 | n5 | 10.0.0.20 |
+  | O4 | Cliente C2 | n6 | 10.0.1.20 |
+  | — | Bootstrapper | n2 | 10.0.4.20 |
+
+- **Ligações overlay:** O1–O2, O2–O3, O2–O4 (como na figura do enunciado).
+- **Porquê o intermédio no n3:** a replicação tem de acontecer *depois* do
+  troço partilhado pelos clientes. Com o intermédio no n3, o link n4–n3 leva
+  uma só cópia do stream. Com o intermédio do lado do servidor (ex.: no n2),
+  o O2 replicaria antes do troço comum e o link n4–n3 levaria duas cópias —
+  tanto como sem overlay.
+- **Bootstrapper no n2:** escolha do Claude (o grupo não tinha preferência);
+  o n2 ficou livre e assim cumpre-se a D06 (processo dedicado).
+- **Ideia para os testes (Etapa 4):** comparar com o intermédio do lado do
+  servidor e medir no Wireshark o tráfego no link n4–n3.
+
+### D20 · Cenário 1: nó intermédio no router n3 (substitui o PC n7 da D19)
+- **Data:** 2026-11-03
+- **Decisão:** O nó intermédio O2 corre no **router n3**, com o IP
+  **10.0.2.1** (interface do link n4–n3). O PC n7 deixa de ser necessário.
+- **Porquê:** Os docentes permitem correr o overlay em routers para
+  simplificar. Com o intermédio no próprio router onde os caminhos para os
+  clientes se separam, desaparece o desvio n3 → n7 → n3 da D19: o link n4–n3
+  continua a levar uma só cópia e a duplicação acontece no ponto ótimo.
+- **IP escolhido:** o n3 tem um IP por interface; qualquer um funciona (o OSPF
+  encaminha para todos). Escolheu-se o 10.0.2.1, do link n4–n3, por estar no
+  backbone e não depender do link de nenhum cliente.
+- **Alternativas rejeitadas:** manter o intermédio no PC n7 — mais
+  "realista" (aplicação só em sistemas terminais, como aconselha o
+  enunciado), mas com o desvio pelo link n3–n7.
+- **Para o relatório:** referir que numa rede real os routers não executam
+  aplicações genéricas, e que a alternativa realista é a da D19.
+
+### D21 · Religação pelo refresh numa thread própria (correção de bug)
+- **Data:** 2026-11-03
+- **Problema (detetado no teste 5 no CORE, link n3–n6 com 100% de perda):**
+  a religação a um vizinho inacessível era feita na própria thread de
+  refresh. Cada tentativa esperava até 3 s pelo timeout (3 tentativas +
+  pausas ≈ 10,5 s), pelo que o refresh do O2 só se repetia ao fim de
+  ~15,5 s — acima do limite de 15 s do bootstrapper. Resultado: o O2, que
+  estava vivo, **expirou no bootstrapper** (12:41:44) e voltou 1 s depois.
+  Um nó que se registasse nesse intervalo não receberia o O2 como vizinho.
+- **Decisão:** o refresh lança cada religação numa thread própria e nunca
+  fica bloqueado. A religação pelo refresh faz **uma só tentativa** (o
+  refresh seguinte volta a tentar) e nunca há duas religações em simultâneo
+  para o mesmo vizinho.
+- **Alternativas rejeitadas:**
+  - Só reduzir tentativas/timeout — o refresh continuaria a bloquear com
+    vários vizinhos inacessíveis.
+  - Aumentar o timeout do bootstrapper — escondia o problema e os nós mortos
+    seriam esquecidos mais tarde.
+- **Verificação:** teste local com um vizinho que o bootstrapper dá como
+  ativo mas cujas ligações dão timeout: durante 40 s, o refresh do O2
+  manteve-se a cada 5 s e o O2 nunca expirou.
+
 ---
 
 ## Detalhes de implementação da Etapa 1 (a rever pelo grupo)
@@ -266,7 +333,8 @@ Confirmar ou alterar:
 - O `HELLO` é trocado nos dois sentidos (teste full-duplex pedido na Etapa 1).
 - Cada nó escuta no IP que lhe está atribuído no ficheiro de configuração
   (permite testar vários nós numa só máquina com 127.0.0.x).
-- Ligação a um vizinho: 3 tentativas com 0,5 s de intervalo.
+- Ligação a um vizinho: 3 tentativas com 0,5 s de intervalo no arranque;
+  1 tentativa nas religações feitas pelo refresh (D21).
 - Qualquer mensagem recebida conta como sinal de vida, não só `HEARTBEAT`.
 - Se um vizinho volta a ligar-se com o mesmo nome, a ligação nova substitui
   a antiga.
@@ -290,6 +358,34 @@ Confirmar ou alterar:
 | Nó bloqueado 9 s (SIGSTOP em O1) | O2 declara O1 morto após 6 s sem heartbeat; ao recuperar, O1 religa-se em ~1 s pelo refresh ✔ |
 | Reentrada de O3 | Volta a ligar-se a O2 normalmente ✔ |
 
+## Testes realizados (Etapa 1, CORE — cenário 1, D19/D20)
+
+| Teste | Resultado |
+|---|---|
+| Arranque: bootstrapper (n2) + O1 (n1), O2 (router n3), O3 (n5), O4 (n6) | Bootstrapper registou os 4 nós; O2 com vizinhos O1, O3, O4; restantes com vizinho O2 ✔ (2026-11-03) |
+| 1 · Saída limpa (Ctrl+C no n5/O3) | O2 remove O3 de imediato (`LEAVE`) ✔ |
+| 2 · Reentrada do O3 | O3 volta a ligar-se ao O2 ✔ |
+| 3 · Nó bloqueado (Ctrl+Z no n6/O4, ~10 s, depois `fg`) | O2 deteta a falha após 6 s sem heartbeat; após o `fg`, religação automática pelo refresh ✔ |
+| 4 · Morte abrupta (`kill -9` no O4) | O2 deteta de imediato (ligação fechada); bootstrapper expira o O4 após ~15 s ✔ |
+| 6 · Nome inválido (O9) | Registo recusado (`REGISTER_ERR`), o nó termina com erro ✔ |
+| 5 · Link n3–n6 com 100% de perda e depois reposto | O4 expirou no bootstrapper após 15 s ✔; com o link reposto, O4 voltou a registar-se e O2 religou-se automaticamente ✔; **bug:** O2 também expirou no bootstrapper sem ter falhado → corrigido (D21), repetir o teste |
+| 5 (repetido após D21) | O2 deteta a perda do O4 por falta de heartbeat (6 s) ✔; tentativas de religação com 1 tentativa e sem bloquear o refresh ✔; O4 expira no bootstrapper (~17 s) e o O2 deixa de tentar ✔; **O2 não expirou** ✔; com o link reposto, O4 regista-se (12:50:56) e o O2 religa-se no refresh seguinte (12:50:59) ✔ |
+
 ## Questões em aberto
 
 - [ ] Identificação dos fluxos nos pacotes UDP
+- [ ] **Pergunta do professor (2026-11-03) — falha de um nó com tráfego (Etapa 2):**
+      quem assume o fluxo, como é escolhido, e o que acontece quando o nó
+      original volta (assume de imediato ou espera pelo fim do fluxo?).
+      Opções discutidas, ainda sem decisão:
+      - *Quem assume:* rotas de reserva locais (uma entrada por vizinho que
+        anunciou o fluxo; anúncios com o caminho percorrido para evitar
+        ciclos) / esperar pelo próximo anúncio / reparação central.
+      - *Regresso:* histerese (só volta se for claramente melhor e estável) /
+        imediato / só no fim do fluxo — qualquer um com *make-before-break*
+        (ativar a rota nova antes de largar a antiga; o buffer descarta
+        duplicados pelo nº de sequência).
+      - *Deteção:* só heartbeats (até 6 s) / também pela ausência de frames
+        (~1 s).
+      - Nota: o Cenário 1 não tem caminhos alternativos; para demonstrar é
+        preciso o Cenário 2 ou 3.
