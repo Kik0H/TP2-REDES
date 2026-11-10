@@ -252,6 +252,167 @@ Formato de cada entrada: **contexto → decisão → porquê → alternativas re
   - Vizinhos reportarem mortes ao bootstrapper — um link em baixo entre dois
     nós poderia marcar como morto um nó que está vivo.
 
+## Etapa 2 — Construção das rotas para os fluxos
+
+### D22 · Estratégia de construção das rotas: anúncios periódicos dos servidores (Estratégia 1 do enunciado)
+- **Data:** 2026-11-10
+- **Decisão:** Cada servidor inunda periodicamente o overlay com anúncios dos
+  seus fluxos. Cada nó reencaminha o anúncio aos vizinhos (inundação
+  controlada, atualizando a métrica) e guarda as rotas na sua tabela, em
+  estado **inativo**. Quando um cliente quer um fluxo, envia um pedido de
+  ativação pelo caminho inverso (seguindo o campo Origem); cada nó no caminho
+  acrescenta quem pediu aos seus Destinos e ativa a rota.
+- **Porquê:**
+  - Rotas alternativas "de graça": cada nó ouve o anúncio de vários vizinhos
+    e pode guardá-los como reservas, permitindo reagir de imediato a falhas.
+  - Métricas de rede (ex.: atraso) fáceis de medir: o anúncio pode levar um
+    timestamp e cada nó mede à chegada.
+  - Suporta naturalmente vários servidores e fluxos (cada servidor anuncia
+    os seus).
+  - Decisões locais em cada nó, sem entidade central; usa só as ligações entre
+    vizinhos da Etapa 1.
+  - É a estratégia descrita com mais pormenor no enunciado.
+- **Custo assumido:** tráfego de controlo periódico (anúncios pequenos).
+- **Alternativas rejeitadas:**
+  - Estratégia 2a (cálculo central da rota) — exige que uma entidade conheça
+    o overlay e as métricas em tempo real; o bootstrapper (D06) só conhece a
+    topologia estática; reação a falhas lenta e ponto central de falha.
+  - Estratégia 2b (pedido do cliente por inundação) — não guarda rotas
+    alternativas e obriga a nova inundação a cada falha.
+- **Por decidir:** métrica, período dos anúncios, controlo da inundação,
+  formato das mensagens, comportamento em falhas (ver questões em aberto).
+
+### D23 · Identificação dos fluxos: nome textual `servidor/vídeo`
+- **Data:** 2026-11-10
+- **Decisão:** Cada fluxo é identificado por `<servidor>/<vídeo>` (ex.:
+  `S1/movie.Mjpeg`), em todas as mensagens de controlo e nos pacotes de
+  vídeo. Nos pacotes UDP de vídeo o id vai num pequeno cabeçalho próprio
+  antes do pacote RTP: 1 byte com o tamanho do id + o id em UTF-8.
+- **Porquê:** Único sem coordenação entre servidores (os nomes dos nós já são
+  únicos, D09); legível nos logs e no Wireshark; não altera o código RTP do
+  exemplo (o pacote RTP vai intacto lá dentro). Custo ~15 bytes por pacote,
+  desprezável face a frames de até ~14 KB.
+- **Alternativas rejeitadas:**
+  - Número no campo SSRC do RTP — sem bytes extra, mas ilegível e obriga a
+    alterar o RTP do exemplo.
+  - Número global definido por configuração — exige que todos os servidores
+    partilhem o mesmo ficheiro.
+
+### D24 · Métrica: atraso por link (RTT medido pelos heartbeats) + nº de saltos
+- **Data:** 2026-11-10
+- **Decisão:** O custo de uma rota é o **atraso acumulado** ao longo do
+  caminho. Cada nó mede o atraso de cada link para os vizinhos através dos
+  heartbeats (que passam a levar um timestamp devolvido pelo vizinho → RTT;
+  atraso do link ≈ RTT/2, suavizado). Cada anúncio vai somando o atraso de
+  cada link que atravessa. O **nº de saltos** é o critério secundário.
+- **Porquê:** Cumpre o requisito de usar métricas da rede e reage a links
+  lentos ou congestionados. Não depende de relógios sincronizados (o RTT é
+  medido com o relógio do próprio nó), pelo que funcionaria numa rede real e
+  não só no CORE. Aproveita os heartbeats já existentes (D15).
+- **Custo assumido:** as medições oscilam → é preciso suavização (média
+  móvel) e histerese na troca de rotas (decisão em aberto).
+- **Alternativas rejeitadas:**
+  - Só nº de saltos — simples e estável, mas ignora a qualidade dos links.
+  - Atraso fim-a-fim com timestamp do servidor — simples no CORE (relógio
+    partilhado), mas numa rede real exigiria relógios sincronizados (NTP).
+- **Por decidir:** fórmula de suavização. (Tolerância de empate: D25.)
+
+### D25 · Tolerância de empate no atraso: 10% (relativa)
+- **Data:** 2026-11-10
+- **Decisão:** Dois atrasos contam como **iguais** se a diferença for menor do
+  que 10% do menor dos dois (ex.: 10 ms e 10,8 ms empatam; 10 ms e 12 ms
+  não). Ordem de comparação entre duas rotas: (1) atraso, com esta
+  tolerância; (2) nº de saltos; (3) regra de desempate final.
+- **Porquê:** Atrasos medidos quase nunca são exatamente iguais (ruído de
+  medição); sem tolerância, a rota trocaria por diferenças de décimas de
+  milissegundo e o critério dos saltos nunca seria usado. Uma tolerância
+  relativa adapta-se tanto a links rápidos como lentos.
+- **Alternativas rejeitadas:** tolerância absoluta de 1 ms (demasiado grande
+  para links muito rápidos, irrelevante para links lentos); sem tolerância
+  (trocas por ruído).
+- **Nota:** valor de 10% discutido com o professor, sugerido por ele e
+  aprovado.
+
+### D26 · Desempate final: manter a Origem atual, depois o nome do vizinho
+- **Data:** 2026-11-10
+- **Decisão:** Se, depois do atraso (com a tolerância da D25) e dos saltos,
+  duas rotas continuarem empatadas: se uma delas é a **Origem atual**, fica
+  essa; se não houver Origem atual (ex.: primeira ativação), ganha o
+  **vizinho de nome alfabeticamente menor**.
+- **Porquê:** Um empate nunca provoca uma troca de rota — só uma rota
+  claramente melhor ou uma falha o fazem. Evita trocas inúteis (pedidos de
+  ativação/desativação e possíveis cortes no vídeo) e o resultado é
+  determinístico, logo reproduzível nos testes.
+- **Exemplo:** com o C a receber pelo A (15,2 ms, 3 saltos) e um anúncio pelo
+  B a 14,9 ms e 3 saltos (diferença de 2% < 10%), o C mantém-se no A.
+- **Alternativas rejeitadas:**
+  - Primeiro a chegar — não determinístico; a rota pode saltar a cada anúncio.
+  - Só o nome menor — obrigaria a largar a Origem atual sem ganho (ex.: voltar
+    ao A só porque "A" < "B").
+
+### D27 · Período dos anúncios: 2 s
+- **Data:** 2026-11-10
+- **Decisão:** Cada servidor envia um anúncio a cada **2 s**.
+- **Porquê:** Um nó ou cliente novo descobre os fluxos em ≤ 2 s e as mudanças
+  de atraso refletem-se depressa; o tráfego é baixo (mensagens de ~200 bytes,
+  face a ~280 KB/s de vídeo). Igual ao período dos heartbeats (D15). As
+  falhas não dependem dos anúncios (são tratadas por heartbeats e reservas).
+- **Alternativas rejeitadas:** 1 s (o dobro do tráfego sem ganho relevante);
+  5 s (nós novos esperariam até 5 s e a adaptação a mudanças de atraso seria
+  lenta).
+
+### D28 · Um anúncio por servidor (lista todos os seus fluxos)
+- **Data:** 2026-11-10
+- **Decisão:** Cada anúncio identifica o servidor e lista todos os seus
+  fluxos (ex.: `{servidor: S1, fluxos: [movie.Mjpeg, outro.Mjpeg], …}`). A
+  tabela de rotas continua a ter uma entrada **por fluxo** (D23).
+- **Porquê:** O caminho e o atraso até um servidor são os mesmos para todos
+  os seus fluxos; agrupar reduz o nº de inundações (metade, com 2 vídeos por
+  servidor).
+- **Alternativas rejeitadas:** um anúncio por fluxo — mais inundações sem
+  informação adicional.
+
+### D29 · Controlo da inundação: nº de sequência + caminho, com reenvio quando melhora
+- **Data:** 2026-11-10
+- **Decisão:**
+  - Cada anúncio leva um identificador `(arranque do servidor, nº de
+    sequência)` e o **caminho** percorrido.
+  - Um nó **descarta** o anúncio se o seu nome já estiver no caminho (volta a
+    ele próprio → evita ciclos e reservas falsas).
+  - Caso contrário, **regista** a entrada (fluxo pelo vizinho que enviou) e
+    **reencaminha** se for a primeira cópia daquele número, **ou** se for uma
+    cópia posterior do mesmo número com custo **melhor** (para além da
+    tolerância da D25) do que o que já anunciou.
+  - A hora de arranque no identificador evita que, quando um servidor
+    reinicia e volta ao nº 1, os nós tomem os anúncios novos por antigos.
+- **Porquê:** Um nº repetido não significa ciclo — significa que o anúncio
+  chegou por outro caminho (ex.: num triângulo, o nó da direita recebe-o pelos
+  dois extremos, e a cópia que chega primeiro pode não ser a de menor custo).
+  Reencaminhar só a primeira cópia faria um nó anunciar aos vizinhos um custo
+  pior do que o seu melhor. Esta opção garante: sem circulação infinita, sem
+  reservas falsas e com os custos certos, com poucos reenvios extra.
+- **Alternativas rejeitadas:**
+  - Nº de sequência + caminho, só a 1.ª cópia — menos mensagens, mas os
+    custos anunciados podem não ser os melhores.
+  - Só caminho — nº de mensagens pode explodir em redes densas.
+  - TTL — não evita duplicados nem reservas falsas.
+
+### D30 · Expiração das rotas: 3 períodos sem anúncio (6 s)
+- **Data:** 2026-11-10
+- **Decisão:** Cada entrada da tabela ("fluxo F pelo vizinho V") guarda a hora
+  do último anúncio recebido por V para esse servidor. Se passarem **6 s**
+  (3 períodos) sem novo anúncio por V, a entrada é apagada. Se a ligação ao V
+  cair (`LEAVE`, fecho do TCP ou heartbeats), todas as entradas por V são
+  apagadas **de imediato**, sem esperar.
+- **Porquê:** Apaga em ~6 s as rotas para servidores que desapareceram ou por
+  vizinhos que perderam o caminho, tolerando a perda pontual de 1–2 anúncios.
+  Mesma lógica dos heartbeats (3 falhados = morto).
+- **Alternativas rejeitadas:** 5 períodos (10 s — mais lento a esquecer rotas
+  mortas); só ao perder o vizinho (rotas "fantasma" para servidores que já
+  não existem).
+- **Por decidir:** o que acontece quando a entrada que expira é a Origem ativa
+  (bloco das falhas).
+
 ## Cenários de teste
 
 ### D19 · Cenário 1: nó intermédio do lado dos clientes
@@ -373,7 +534,6 @@ Confirmar ou alterar:
 
 ## Questões em aberto
 
-- [ ] Identificação dos fluxos nos pacotes UDP
 - [ ] **Pergunta do professor (2026-11-03) — falha de um nó com tráfego (Etapa 2):**
       quem assume o fluxo, como é escolhido, e o que acontece quando o nó
       original volta (assume de imediato ou espera pelo fim do fluxo?).
