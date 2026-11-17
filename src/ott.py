@@ -4,8 +4,10 @@ ott.py — Nó intermédio do overlay.
 Uso:
     python3 ott.py <nome> <ip_bootstrapper> [-v]
 
-Exemplo (no CORE, no nó que corresponde a O3):
-    python3 ott.py O3 10.0.0.10
+Exemplo (no CORE, na máquina que corresponde a O2):
+    python3 ott.py O2 10.0.4.20
+
+Comandos no terminal (D41): t = tabela de rotas, v = vizinhos, h = ajuda.
 """
 
 import argparse
@@ -21,6 +23,14 @@ def configurar_logs(verboso=False):
     logging.basicConfig(level=logging.DEBUG if verboso else logging.INFO,
                         format="%(asctime)s [%(name)s] %(message)s",
                         datefmt="%H:%M:%S")
+
+
+def argumentos_base(descricao):
+    ap = argparse.ArgumentParser(description=descricao)
+    ap.add_argument("nome", help="nome lógico do nó (ex.: O3)")
+    ap.add_argument("bootstrapper", help="IP do bootstrapper")
+    ap.add_argument("-v", "--verboso", action="store_true")
+    return ap
 
 
 def correr(no):
@@ -41,11 +51,7 @@ def correr(no):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Nó do overlay OTT")
-    ap.add_argument("nome", help="nome lógico do nó (ex.: O3)")
-    ap.add_argument("bootstrapper", help="IP do bootstrapper")
-    ap.add_argument("-v", "--verboso", action="store_true")
-    args = ap.parse_args()
+    args = argumentos_base("Nó intermédio do overlay OTT").parse_args()
     configurar_logs(args.verboso)
     correr(No(args.nome, args.bootstrapper))
 

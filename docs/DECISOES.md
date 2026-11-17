@@ -332,6 +332,8 @@ Formato de cada entrada: **contexto → decisão → porquê → alternativas re
   (trocas por ruído).
 - **Nota:** valor de 10% discutido com o professor, sugerido por ele e
   aprovado.
+- **Complemento (D43):** diferenças menores do que 1 ms também contam como
+  empate.
 
 ### D26 · Desempate final: manter a Origem atual, depois o nome do vizinho
 - **Data:** 2026-11-10
@@ -413,6 +415,271 @@ Formato de cada entrada: **contexto → decisão → porquê → alternativas re
 - **Por decidir:** o que acontece quando a entrada que expira é a Origem ativa
   (bloco das falhas).
 
+### D31 · Ativação explícita: mensagens ATIVAR / DESATIVAR
+- **Data:** 2026-11-17
+- **Decisão:** O cliente envia `ATIVAR` uma vez; a rota mantém-se ativa até
+  chegar um `DESATIVAR` ou até o vizinho de baixo se perder (`LEAVE`, fecho do
+  TCP ou heartbeats — mecanismos da Etapa 1), caso em que é retirado dos
+  Destinos.
+- **Porquê:** As mensagens vão por TCP (D02), logo não se perdem; a deteção de
+  vizinhos perdidos já existe e trata os clientes que morrem sem avisar. Só há
+  tráfego de controlo quando alguém entra ou sai.
+- **Alternativas rejeitadas:** renovação periódica (soft state) — robusta a
+  mensagens perdidas, problema que não temos, à custa de tráfego constante e
+  mais temporizadores.
+
+### D32 · O pedido de ativação pára no primeiro nó já ativo (por fluxo)
+- **Data:** 2026-11-17
+- **Decisão:** Quando um nó recebe `ATIVAR` para um fluxo que **já está a
+  receber**, acrescenta quem pediu aos Destinos desse fluxo e não propaga o
+  pedido. Se ainda não o recebe, acrescenta-o aos Destinos e envia `ATIVAR` à
+  sua Origem para esse fluxo. A regra aplica-se **por fluxo**: um nó ativo
+  para `S1/movie.Mjpeg` mas não para `S2/outro` propaga normalmente um pedido
+  do segundo.
+- **Porquê:** Garante que cada link transporta no máximo uma cópia de cada
+  fluxo (a replicação acontece no nó onde os caminhos se separam) com o
+  mínimo de mensagens.
+- **Alternativas rejeitadas:** propagar sempre até ao servidor — o servidor
+  saberia de todos os clientes, mas com mais mensagens e o risco de
+  duplicar envios se algum nó não verificasse que já está ativo.
+
+### D33 · Poda imediata dos ramos sem Destinos
+- **Data:** 2026-11-17
+- **Decisão:** Quando um nó que não é cliente fica sem Destinos para um fluxo
+  (por `DESATIVAR` de um vizinho ou por perda do vizinho), envia logo
+  `DESATIVAR` à sua Origem desse fluxo e a rota volta a inativa. A poda sobe
+  em cadeia enquanto os nós de cima também ficarem sem Destinos, e pára no
+  primeiro nó que ainda tenha outros Destinos.
+- **Porquê:** Liberta a largura de banda de imediato; o vídeo só circula onde
+  há quem o veja. A reativação também é rápida (o pedido sobe só até ao
+  primeiro nó ativo, D32), pelo que não compensa esperar.
+- **Alternativas rejeitadas:**
+  - Tempo de graça de ~5 s — evita reativações se um cliente sair e voltar
+    logo, mas desperdiça até 5 s de vídeo por ramo e exige mais um
+    temporizador.
+  - Não podar — ramos inúteis a receber vídeo para sempre.
+
+### D34 · Pedidos para fluxos sem rota: o cliente só pede o que conhece; erro explícito
+- **Data:** 2026-11-17
+- **Decisão:**
+  - O cliente, sendo um nó do overlay, recebe os anúncios; a sua tabela de
+    rotas é a **lista de vídeos disponíveis**, que mostra ao utilizador. Só
+    envia `ATIVAR` para fluxos dessa lista (um fluxo desconhecido é recusado
+    localmente, sem mensagens na rede).
+  - Um nó que receba `ATIVAR` para um fluxo sem rota (caso raro: a rota
+    expirou nele mas ainda não nos nós de baixo) responde `ATIVAR_ERRO`. Quem
+    o recebe retira o pedinte dos Destinos desse fluxo e passa o erro para
+    baixo, até ao cliente, que mostra "fluxo indisponível de momento".
+- **Porquê:** O cliente nunca fica à espera de um vídeo que não vem; o caso
+  normal não gera tráfego inútil; o utilizador vê os vídeos disponíveis,
+  que aparecem e desaparecem sozinhos com os anúncios.
+- **Alternativas rejeitadas:**
+  - Pedido pendente até chegar um anúncio — mais estado e temporizadores; o
+    cliente só saberia do problema no fim do tempo limite.
+  - Ignorar — o cliente ficaria à espera para sempre.
+
+### D35 · Falha da Origem ativa: passa à melhor reserva local; sem reserva, espera pelo anúncio
+- **Data:** 2026-11-17 · *(resposta à pergunta do professor de 2026-11-03)*
+- **Decisão:** Quando a Origem ativa de um fluxo cai (vizinho perdido) ou
+  falha (D36), o nó **imediatamente abaixo** — o que recebia dela — apaga as
+  entradas por essa Origem e escolhe a **melhor reserva** da sua tabela para
+  esse fluxo (critérios D24–D26), enviando-lhe `ATIVAR`; se essa reserva não
+  estiver ativa, propaga o pedido para cima (D32). Os nós mais abaixo não
+  fazem nada (continuam ligados ao mesmo nó e não notam a troca). Se não houver
+  reserva, a rota fica inativa (mantendo os Destinos) até um anúncio trazer um
+  caminho novo, sendo então reativada.
+- **Porquê:** As reservas já existem na tabela graças aos anúncios (D22, D30);
+  a reparação é imediata, local e sem entidade central. Ninguém precisa de
+  "nomear" um substituto.
+- **Alternativas rejeitadas:**
+  - Só esperar pelo próximo anúncio — mais lento (até mais 2 s) e desperdiça
+    as reservas.
+  - Reparação central — lenta e cria um ponto central de falha.
+
+### D36 · Deteção da falha: mecanismos da Etapa 1 + ~1 s sem vídeo
+- **Data:** 2026-11-17
+- **Decisão:** Para além de `LEAVE`, fecho do TCP e heartbeats (até 6 s),
+  qualquer nó com uma rota **ativa** vigia o fluxo: se não chegar nenhum
+  pacote desse fluxo pela Origem durante **~1 s** (20 frames a 20 fps),
+  considera a Origem falhada **para esse fluxo** e aplica a D35.
+- **Porquê:** Reduz o vídeo parado de até 6 s para ~1 s quando um link cai, e
+  apanha também vizinhos vivos que deixaram de reencaminhar (ex.: perderam a
+  sua própria Origem).
+- **Requisito para a Etapa 4:** o servidor tem de enviar continuamente (ex.:
+  repetir o vídeo em ciclo); caso contrário, o fim do vídeo seria confundido
+  com uma falha.
+- **Alternativas rejeitadas:** só os mecanismos atuais — até 6 s de vídeo
+  parado.
+
+### D37 · Regresso do nó original: troca só se for >10% melhor durante 3 anúncios seguidos
+- **Data:** 2026-11-17 · *(resposta à pergunta do professor de 2026-11-03)*
+- **Decisão:** Quando um nó volta e os anúncios voltam a passar por ele, **não
+  "reclama" nada**: é o nó de baixo que decide. Este só troca a sua Origem
+  atual por outra se a nova rota for **mais de 10% melhor** (D25) em **3
+  anúncios seguidos** (~6 s, D27). Aplica-se a qualquer troca por uma rota
+  melhor, não só ao regresso de um nó.
+- **Porquê:** Usa a melhor rota passado pouco tempo, mas um nó instável
+  (que liga e desliga) não provoca trocas sucessivas (histerese).
+- **Alternativas rejeitadas:**
+  - Só a margem de 10% — trocaria no primeiro anúncio melhor; um nó instável
+    provocaria uma troca de cada vez que volta.
+  - Nunca voltar sozinho / só no fim do fluxo — um fluxo ao vivo pode nunca
+    acabar; ficar-se-ia indefinidamente na rota pior.
+- **Por decidir:** como se faz a troca em si (make-before-break ou não).
+
+### D38 · Troca de Origem por make-before-break
+- **Data:** 2026-11-17 · *(completa a resposta à pergunta do professor)*
+- **Decisão:** Numa troca por uma rota melhor (D37), o nó: (1) envia `ATIVAR`
+  à nova Origem, mantendo a antiga; (2) enquanto recebe pelos dois caminhos,
+  reencaminha **cada frame uma só vez**, descartando os repetidos pelo nº de
+  sequência do RTP (cada nó guarda, por fluxo, o último nº reencaminhado);
+  (3) quando chega o primeiro frame pela nova Origem, envia `DESATIVAR` à
+  antiga (que é podada como na D33). Numa falha (D35) não se aplica: a Origem
+  antiga já não envia nada.
+- **Porquê:** A troca não corta o vídeo — o cliente recebe todos os frames.
+  Custo: um contador por fluxo em cada nó e uns instantes de tráfego
+  duplicado no troço que muda.
+- **Alternativas rejeitadas:** break-before-make — mais simples, mas perde os
+  frames enviados enquanto a nova rota ainda não começou a transmitir.
+
+### D39 · Suavização do atraso: média móvel exponencial com α = 0,25
+- **Data:** 2026-11-17
+- **Decisão:** O atraso de cada link é atualizado a cada medição de RTT (uma
+  por heartbeat, a cada 2 s) por
+  `atraso = 0,75 × atraso_anterior + 0,25 × nova_medição` (atraso ≈ RTT/2).
+- **Porquê:** Filtra o ruído das medições mas reflete uma mudança real em
+  ~8 s; somado à estabilidade de 3 anúncios da D37 (~6 s), uma degradação real
+  de um link leva a troca de rota em ~8–14 s. É a técnica usada pelo TCP para
+  o RTT (SRTT).
+- **Alternativas rejeitadas:**
+  - α = 0,125 (valor do TCP) — pensado para medições por pacote; com uma
+    medição a cada 2 s demoraria ~16 s a reagir.
+  - α = 0,5 — reage em ~4 s, mas oscila mais e, com a margem de 10%, poderia
+    trocar de rota por ruído.
+  - Média das últimas 5 medições — comportamento semelhante (~10 s), com mais
+    estado.
+
+### D40 · Tabela de rotas: uma entrada por fluxo, com as candidatas por vizinho
+- **Data:** 2026-11-17
+- **Decisão:** Cada nó guarda, por fluxo (D23):
+  `estado` (ativa/inativa), `origem` (vizinho de onde recebe), `destinos`
+  (vizinhos a quem reenvia), `sou_cliente`, `ultimo_seq` (último frame
+  reencaminhado, D38), `ultimo_pacote` (hora, D36) e `candidatas` — uma por
+  vizinho que anunciou o fluxo, com `atraso`, `saltos`, `caminho`,
+  `ultimo_anuncio` (D30) e `melhor_seguidos` (contador da D37). Por servidor,
+  guarda o identificador do último anúncio visto e o custo já anunciado
+  (D29).
+- **Porquê:** Corresponde diretamente ao enunciado ("uma rota por fluxo:
+  Fluxo, Custo, Origem, Destinos, Estado"), com as reservas agrupadas no
+  fluxo a que pertencem; Destinos e Origem guardados uma só vez.
+- **Alternativas rejeitadas:** tabela plana com uma linha por (fluxo, vizinho)
+  — mais simples de imprimir, mas Destinos repetidos e menos fiel ao
+  enunciado.
+
+### D41 · Inspeção da tabela durante os testes: comandos no terminal do nó
+- **Data:** 2026-11-17
+- **Decisão:** No terminal onde corre o nó, `t` + Enter imprime a tabela de
+  rotas atual e `v` + Enter imprime os vizinhos com o atraso medido de cada
+  link. Mantêm-se os logs de cada mudança (ex.: "Origem do F passou de B para
+  A").
+- **Porquê:** Permite ver o estado completo no momento exato (testes no CORE,
+  Etapa 3 e capturas para o relatório) sem encher o ecrã.
+- **Alternativas rejeitadas:** impressão periódica (enche o ecrã); só logs
+  (não mostra o estado completo).
+
+### D42 · Dados de teste já na Etapa 2
+- **Data:** 2026-11-17
+- **Decisão:** Na Etapa 2 o servidor já envia, a 20 pacotes/s por fluxo ativo,
+  pacotes de dados **numerados** com o formato da D23 (id do fluxo + cabeçalho
+  RTP + conteúdo de teste), que os nós reencaminham pelas rotas (UDP 6001,
+  D12). O cliente conta recebidos, perdidos e duplicados. Na Etapa 4 o
+  conteúdo de teste é substituído pelos frames do vídeo.
+- **Porquê:** Permite implementar e testar já a D36 (deteção por falta de
+  vídeo) e a D38 (descarte de duplicados), e demonstrar no CORE as falhas e a
+  troca sem corte. A Etapa 4 fica reduzida ao vídeo real (ler o ficheiro e
+  mostrar a janela).
+- **Alternativas rejeitadas:** só o plano de controlo agora — a D36, a D38 e o
+  reencaminhamento ficariam todos para a Etapa 4, sem forma de testar as
+  falhas na Etapa 2.
+
+### D43 · Empate no atraso: diferença < 10% **ou** < 1 ms (complementa a D25)
+- **Data:** 2026-11-17
+- **Decisão:** Dois atrasos empatam se a diferença for menor do que 10% do
+  menor (D25) **ou** menor do que 1 ms.
+- **Porquê:** Com links sem atraso configurado (testes locais ou CORE por
+  omissão) o atraso medido é ~0,1 ms, quase só tempo de processamento; uma
+  variação de 0,02 ms já excederia os 10% e as rotas mudariam por ruído. O
+  mínimo absoluto faz com que, nesses casos, decidam os saltos; em links reais
+  (vários ms) a regra dos 10% acordada com o professor mantém-se.
+- **Alternativas rejeitadas:** só os 10% (obrigaria a configurar atrasos em
+  todos os testes para evitar trocas por ruído).
+
+### D44 · `ATIVAR_ERRO`: tentar as reservas antes de passar o erro (complementa a D34)
+- **Data:** 2026-11-17
+- **Decisão:** Quem recebe `ATIVAR_ERRO` da sua Origem apaga essa candidata
+  para o fluxo e tenta a melhor reserva (como na D35). Só se não houver
+  nenhuma é que passa o `ATIVAR_ERRO` aos seus Destinos (que os retiram e
+  fazem o mesmo), até ao cliente.
+- **Porquê:** Se existir outro caminho, o cliente recebe o vídeo em vez de um
+  erro; mantém uma só regra para "a minha Origem não serve" (D35).
+- **Alternativas rejeitadas:** passar o erro logo (D34 à letra) — o cliente
+  receberia um erro mesmo havendo caminho alternativo.
+
+### D45 · Vizinho que deixou de enviar vídeo: candidata suspensa ~10 s
+- **Data:** 2026-11-17
+- **Decisão:** Quando a D36 dispara (~1 s sem vídeo pela Origem), além de
+  passar à reserva, o nó marca a candidata por essa Origem como **suspensa
+  durante 10 s para esse fluxo**: continua a ser atualizada pelos anúncios,
+  mas não pode ser escolhida (nem pela D35 nem pela D37) até a suspensão
+  acabar.
+- **Porquê:** Um vizinho pode estar vivo e a anunciar a melhor rota sem
+  reencaminhar o vídeo (falha só no plano de dados: thread de UDP com erro,
+  firewall no porto 6001, ou perda tão alta que o TCP ainda passa mas o UDP
+  não). Sem suspensão, a D37 voltaria a ele após 3 anúncios e haveria um corte
+  de ~1 s a cada ~7 s. Com suspensão, um problema temporário recupera em
+  ~16 s e um persistente custa uma tentativa a cada ~17 s.
+- **Alternativas rejeitadas:** sem suspensão (ciclo de cortes); só voltar a
+  contar depois de a ligação ao vizinho cair e voltar (um problema temporário
+  nunca seria recuperado).
+
+### D46 · Pacotes de dados levam também o nome do vizinho que os enviou (complementa a D23)
+- **Data:** 2026-11-17
+- **Decisão:** O cabeçalho próprio dos pacotes de dados passa a ser:
+  1 byte com o tamanho do id do fluxo + id do fluxo (D23) + 1 byte com o
+  tamanho do nome do remetente + nome do remetente + pacote RTP. Cada nó, ao
+  reencaminhar, escreve o seu próprio nome como remetente.
+- **Porquê:** Na troca sem corte (D38), o nó tem de saber quando chega o
+  primeiro pacote **pela nova Origem**; o IP de origem do UDP não serve, porque
+  um nó com várias interfaces (ex.: um router) pode enviar por um IP diferente
+  do configurado (mesmo problema da D09). Também permite à D36 contar só os
+  pacotes vindos da Origem e ajuda nos logs/Wireshark. Custo: ~3 bytes.
+- **Alternativas rejeitadas:**
+  - Temporizador fixo (~0,5 s) — se a nova rota demorasse mais, haveria corte.
+  - Confirmação `ATIVAR_OK` — mais uma mensagem, sem garantir que os pacotes
+    já estão a chegar.
+
+### D47 · Cascata na D36: sem reserva, o nó mantém a Origem
+- **Data:** 2026-11-17
+- **Problema (detetado nos testes locais):** quando um nó deixa de enviar
+  dados, **todos** os nós abaixo dele ficam sem dados ao mesmo tempo e a D36
+  disparava em todos ao mesmo tempo. Os clientes (sem reserva) suspendiam e
+  desativavam a sua Origem, que ficava sem Destinos e podava a árvore inteira;
+  num teste, um cliente perdeu ~24 s de vídeo (486 pacotes).
+- **Decisão:** quando a D36 dispara num nó **sem nenhuma reserva**, o nó não
+  faz nada: mantém a Origem, não suspende nem desativa (só regista no log).
+  Só muda quem tem alternativa.
+- **Porquê:** Só o nó imediatamente abaixo da falha deve reagir; os de baixo
+  recebem o vídeo de volta assim que ele muda. Resolve o caso mais comum
+  (clientes e nós com um só caminho) sem tornar a deteção mais lenta. No mesmo
+  teste, a perda passou para 23 pacotes (~1,1 s, o tempo de deteção).
+- **Alternativas rejeitadas:**
+  - Tempo da D36 escalonado pela distância ao servidor — deteção mais lenta
+    para nós longe do servidor.
+  - Aviso `RECUPERAR` aos Destinos — mensagem nova e corrida com os
+    temporizadores dos nós de baixo.
+  - (O escalonamento pode juntar-se mais tarde se houver trocas
+    desnecessárias em topologias com muitas reservas.)
+
 ## Cenários de teste
 
 ### D19 · Cenário 1: nó intermédio do lado dos clientes
@@ -482,6 +749,66 @@ Formato de cada entrada: **contexto → decisão → porquê → alternativas re
 
 ---
 
+## Detalhes de implementação da Etapa 2 (a rever pelo grupo)
+
+Pequenas escolhas feitas ao escrever o código, dentro das decisões acima.
+Confirmar ou alterar:
+
+**Correção necessária encontrada nos testes**
+- O `HELLO` passou a levar o **IP configurado** do nó (`ip`). Antes, o IP de
+  um vizinho que se ligava a nós era o IP de origem da ligação TCP, que pode
+  não ser o IP onde ele está à escuta (localmente é sempre 127.0.0.1; no CORE
+  um router pode ligar por outra interface — o problema da D09). Os pacotes de
+  dados iam para um IP sem ninguém à escuta.
+
+**Medição do atraso (D24, D39)**
+- `HEARTBEAT {t, eco, espera}`: RTT = agora − eco − espera, só com o relógio
+  de quem mede. Ao ligar a um vizinho envia-se logo um heartbeat, e quem
+  recebe um heartbeat sem eco responde de imediato — o atraso fica medido em
+  milissegundos, sem esperar 2–4 s.
+- A primeira estimativa de quem inicia a ligação é o RTT do `HELLO`.
+- Enquanto um link não foi medido, usa-se 1 ms.
+
+**Anúncios (D29)**
+- Um anúncio não é reencaminhado para vizinhos que já estão no caminho
+  (seriam descartados por eles).
+
+**Escolha da Origem e ciclos**
+- A Origem nunca é escolhida entre os Destinos do próprio fluxo.
+- Um `ATIVAR` vindo da própria Origem (ou da nova Origem numa troca) é
+  recusado com `ATIVAR_ERRO` ("pedido em ciclo").
+- O contador da D37 conta anúncios recebidos de cada candidata e volta a 0
+  sempre que ela não é melhor ou que a Origem muda.
+
+**Plano de dados (D36, D38, D42)**
+- Ao ativar uma rota, o temporizador da D36 começa nesse momento (dá 1 s até
+  ao primeiro pacote).
+- Só são aceites pacotes da Origem ou da nova Origem numa troca; os de outros
+  remetentes são ignorados.
+- O último nº de sequência mantém-se numa falha (evita reenviar repetidos se
+  a nova Origem vier atrasada); se passar mais de 1 s sem pacotes aceita-se
+  qualquer número (ex.: servidor reiniciado).
+- Troca sem corte (D38) em que a nova Origem não envia nada em 1 s: é
+  cancelada, a candidata recebe `DESATIVAR` e fica suspensa 10 s (como na
+  D45). O vídeo continua pela Origem atual, sem corte.
+- Fluxo que deixa de ter candidatas (ninguém o anuncia, ex.: servidor saiu):
+  é apagado da tabela; se estava ativo, os Destinos recebem `ATIVAR_ERRO` e o
+  cliente local é avisado.
+
+**Servidor e cliente**
+- O servidor só envia dados de um fluxo enquanto ele tem Destinos; o nº de
+  sequência continua a contar mesmo sem Destinos. Conteúdo de teste de
+  1000 bytes; timestamp RTP em ms; tipo RTP 26 (MJPEG).
+- O servidor é um nó normal: também reencaminha anúncios e dados de outros
+  servidores.
+- Cliente: comandos `l` (lista), `ver <fluxo>`, `parar <fluxo>`,
+  `e` (estatísticas); opção `--ver <fluxo>` no arranque (espera até 15 s que
+  o fluxo apareça); resumo das estatísticas a cada 5 s.
+- Comando de teste `x` em qualquer nó: simula uma falha **só nos dados** (o nó
+  continua vivo e a anunciar, mas não reencaminha) — serve para demonstrar a
+  D36/D45/D47.
+- A manutenção (expirações, D36, trocas pendentes) corre a cada 0,2 s.
+
 ## Detalhes de implementação da Etapa 1 (a rever pelo grupo)
 
 Pequenas escolhas feitas ao escrever o código, dentro das decisões acima.
@@ -507,6 +834,24 @@ Confirmar ou alterar:
   lados ficam com a ligação iniciada pelo nó de nome menor.
 - O bootstrapper só regista no log os refreshes com `-v` (para não encher
   o ecrã de 5 em 5 s).
+
+## Testes realizados (Etapa 2, local com 127.0.0.x)
+
+Topologia `topologias/etapa2-local.json`: servidores S1 (`movie.Mjpeg`,
+`video2.Mjpeg`) e S2 (`outro.Mjpeg`, `clip.Mjpeg`); o C chega ao S1 pelo A
+(3 saltos) ou pelo B (4 saltos, via Y); clientes D e E ligados ao C.
+
+| Teste | Resultado |
+|---|---|
+| T1 · Anúncios dos 2 servidores | Todos os nós conhecem os 4 fluxos; o C guarda as duas candidatas para os fluxos do S1 (pelo A e pelo B) com atraso, saltos e caminho ✔ |
+| T2 · 2.º cliente pede o mesmo fluxo | O pedido do E pára no C (já ativo); o C replica para D e E ✔ (D32) |
+| T3 · Fluxo do 2.º servidor + fluxo inexistente | `S2/outro` ativado pelo B ✔; `S9/nada` recusado localmente com a lista dos disponíveis, sem mensagens na rede ✔ (D34) |
+| T4 · `kill -9` na Origem (A) | O C passa de imediato à reserva B; **0 pacotes perdidos** nos clientes ✔ (D35) |
+| T5 · A volta (melhor em saltos) | Ao 3.º anúncio, troca sem corte para o A: **0 perdidos**, 1 duplicado descartado ✔ (D37, D38) |
+| T6 · Falha só nos dados no A (comando `x`) | O C deteta em ~1 s e passa ao B, A suspenso 10 s ✔ (D36, D45); D e E sem reserva mantêm a Origem ✔ (D47): **23 pacotes perdidos** (~1,1 s). Na nova tentativa com o A ainda avariado, a troca é cancelada **sem corte** ✔; com o A reparado, troca sem corte ✔ |
+| T6 (antes da D47) | Cascata: os clientes desativaram o C e perderam 486 pacotes (~24 s) ✘ → corrigido pela D47 |
+| T7 · Poda | D e E deixam de ver: o C, o A e o X podam em cadeia até ao servidor ✔ (D33) |
+| T8 · Servidor S2 sai | Os fluxos do S2 desaparecem das tabelas; o cliente que via `S2/outro` recebe `ATIVAR_ERRO` e é avisado ✔ |
 
 ## Testes realizados (Etapa 1, local com 127.0.0.x — cenário 1)
 
@@ -534,18 +879,12 @@ Confirmar ou alterar:
 
 ## Questões em aberto
 
-- [ ] **Pergunta do professor (2026-11-03) — falha de um nó com tráfego (Etapa 2):**
-      quem assume o fluxo, como é escolhido, e o que acontece quando o nó
-      original volta (assume de imediato ou espera pelo fim do fluxo?).
-      Opções discutidas, ainda sem decisão:
-      - *Quem assume:* rotas de reserva locais (uma entrada por vizinho que
-        anunciou o fluxo; anúncios com o caminho percorrido para evitar
-        ciclos) / esperar pelo próximo anúncio / reparação central.
-      - *Regresso:* histerese (só volta se for claramente melhor e estável) /
-        imediato / só no fim do fluxo — qualquer um com *make-before-break*
-        (ativar a rota nova antes de largar a antiga; o buffer descarta
-        duplicados pelo nº de sequência).
-      - *Deteção:* só heartbeats (até 6 s) / também pela ausência de frames
-        (~1 s).
-      - Nota: o Cenário 1 não tem caminhos alternativos; para demonstrar é
-        preciso o Cenário 2 ou 3.
+- [ ] **Testar a Etapa 2 no CORE**: topologia com caminhos alternativos
+      (Cenário 2) e um 2.º servidor com 2 fluxos; testes com atrasos e perdas
+      configurados nos links (para ver as rotas seguirem o menor atraso).
+- [ ] Rever os "Detalhes de implementação da Etapa 2".
+
+- [x] **Pergunta do professor (2026-11-03) — falha de um nó com tráfego:**
+      respondida pelas D35 (quem assume), D36 (deteção), D37 (regresso) e
+      D38 (troca sem corte). Para demonstrar é preciso uma topologia com
+      caminhos alternativos (Cenário 2 ou 3).
